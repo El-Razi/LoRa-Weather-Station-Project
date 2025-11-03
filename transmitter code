@@ -1,16 +1,3 @@
-/*
- * Weather Station - Arduino Uno Sensor Unit
- * Reads multiple sensor data and transmits via LoRa RYLR998
- * 
- * Hardware Connections:
- * - DHT22: Pin 2
- * - BMP280: I2C (SDA=A4, SCL=A5)
- * - Rain Sensor: Analog Pin A0
- * - LDR Light Sensor: Analog Pin A1
- * - Wind Speed (Anemometer): Pin 3 (interrupt)
- * - RYLR998 LoRa: Serial (Pins 4, 5 via SoftwareSerial)
- */
-
 #include <SoftwareSerial.h>
 #include <DHT.h>
 #include <Wire.h>
