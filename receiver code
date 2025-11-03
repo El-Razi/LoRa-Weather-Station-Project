@@ -1,0 +1,498 @@
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+
+// TFT pin definitions (avoiding conflicts)
+#define TFT_CS    PB6
+#define TFT_DC    PB7
+#define TFT_RST   PB8
+
+// Button pin
+#define BUTTON_PIN PC13
+
+// Display object
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
+
+// Weather data structure
+struct WeatherData {
+  float temperature;
+  float humidity;
+  float pressure;
+  float lightLevel;
+  float rainLevel;
+  float windSpeed;
+  unsigned long timestamp;
+  bool dataValid;
+};
+
+// Historical data storage (last 24 readings)
+WeatherData historicalData[24];
+int historyIndex = 0;
+int historyCount = 0;
+
+// Current data and display variables
+WeatherData currentData;
+int currentPage = 0;
+const int totalPages = 3;
+unsigned long lastButtonPress = 0;
+unsigned long lastDataUpdate = 0;
+unsigned long lastDisplayUpdate = 0;
+bool buttonPressed = false;
+
+// Display update intervals
+const unsigned long DISPLAY_UPDATE_INTERVAL = 5000;  // 5 seconds
+const unsigned long DATA_TIMEOUT = 180000;           // 3 minutes
+
+void setup() {
+  Serial.begin(9600);
+  Serial2.begin(9600); // LoRa communication
+  
+  // Initialize TFT display
+  tft.begin();
+  tft.setRotation(1); // Landscape mode
+  tft.fillScreen(ILI9341_BLACK);
+  
+  // Initialize button
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  
+  // Initialize LoRa module
+  initLoRa();
+  
+  // Initialize data
+  currentData.dataValid = false;
+  
+  // Display startup message
+  displayStartupMessage();
+  
+  Serial.println("Weather Station Display Unit Initialized");
+  delay(2000);
+}
+
+void loop() {
+  // Check for incoming LoRa data
+  checkLoRaData();
+  
+  // Handle button press for page navigation
+  handleButtonPress();
+  
+  // Update display periodically
+  if (millis() - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL) {
+    updateDisplay();
+    lastDisplayUpdate = millis();
+  }
+  
+  delay(100);
+}
+
+void initLoRa() {
+  delay(1000);
+  
+  // Reset LoRa module
+  Serial2.println("AT+RESET");
+  delay(2000);
+  
+  // Set network ID
+  Serial2.println("AT+NETWORKID=5");
+  delay(500);
+  
+  // Set address for this unit (display unit)
+  Serial2.println("AT+ADDRESS=2");
+  delay(500);
+  
+  // Set transmission parameters
+  Serial2.println("AT+PARAMETER=12,4,1,7");
+  delay(500);
+  
+  Serial.println("LoRa initialized");
+}
+
+void checkLoRaData() {
+  if (Serial2.available()) {
+    String receivedData = Serial2.readString();
+    
+    // Look for +RCV message
+    if (receivedData.indexOf("+RCV=") != -1) {
+      // Parse the received data
+      int dataStart = receivedData.indexOf(",", receivedData.indexOf(",") + 1) + 1;
+      String data = receivedData.substring(dataStart);
+      data.trim();
+      
+      // Parse comma-separated values
+      if (parseWeatherData(data)) {
+        lastDataUpdate = millis();
+        storeHistoricalData();
+        Serial.println("Data received and parsed successfully");
+      }
+    }
+  }
+}
+
+bool parseWeatherData(String data) {
+  int commaIndex = 0;
+  int lastIndex = 0;
+  int fieldIndex = 0;
+  
+  // Parse each field
+  while (commaIndex != -1 && fieldIndex < 7) {
+    commaIndex = data.indexOf(',', lastIndex);
+    String field = (commaIndex != -1) ? data.substring(lastIndex, commaIndex) : data.substring(lastIndex);
+    
+    switch (fieldIndex) {
+      case 0: currentData.temperature = field.toFloat(); break;
+      case 1: currentData.humidity = field.toFloat(); break;
+      case 2: currentData.pressure = field.toFloat(); break;
+      case 3: currentData.lightLevel = field.toFloat(); break;
+      case 4: currentData.rainLevel = field.toFloat(); break;
+      case 5: currentData.windSpeed = field.toFloat(); break;
+      case 6: currentData.timestamp = field.toInt(); break;
+    }
+    
+    lastIndex = commaIndex + 1;
+    fieldIndex++;
+  }
+  
+  // Validate data
+  if (fieldIndex == 7 && currentData.temperature != -999 && currentData.humidity != -999) {
+    currentData.dataValid = true;
+    return true;
+  }
+  
+  return false;
+}
+
+void storeHistoricalData() {
+  historicalData[historyIndex] = currentData;
+  historyIndex = (historyIndex + 1) % 24;
+  if (historyCount < 24) historyCount++;
+}
+
+void handleButtonPress() {
+  if (digitalRead(BUTTON_PIN) == LOW && !buttonPressed) {
+    if (millis() - lastButtonPress > 200) { // Debounce
+      currentPage = (currentPage + 1) % totalPages;
+      buttonPressed = true;
+      lastButtonPress = millis();
+      updateDisplay(); // Immediate update on page change
+    }
+  } else if (digitalRead(BUTTON_PIN) == HIGH) {
+    buttonPressed = false;
+  }
+}
+
+void updateDisplay() {
+  switch (currentPage) {
+    case 0:
+      displayCurrentData();
+      break;
+    case 1:
+      displayWeatherConditions();
+      break;
+    case 2:
+      displayHistoricalData();
+      break;
+  }
+}
+
+void displayStartupMessage() {
+  tft.fillScreen(ILI9341_BLACK);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(80, 100);
+  tft.println("Weather Station");
+  tft.setCursor(110, 130);
+  tft.println("Starting...");
+}
+
+void displayCurrentData() {
+  tft.fillScreen(ILI9341_BLACK);
+  
+  // Header
+  tft.setTextColor(ILI9341_CYAN);
+  tft.setTextSize(2);
+  tft.setCursor(10, 10);
+  tft.println("Current Weather Data");
+  
+  // Draw line
+  tft.drawLine(0, 35, 320, 35, ILI9341_CYAN);
+  
+  // Check data validity and age
+  bool dataOld = (millis() - lastDataUpdate) > DATA_TIMEOUT;
+  
+  if (!currentData.dataValid || dataOld) {
+    tft.setTextColor(ILI9341_RED);
+    tft.setTextSize(2);
+    tft.setCursor(50, 120);
+    tft.println("No Data Available");
+    return;
+  }
+  
+  tft.setTextSize(1);
+  int y = 50;
+  
+  // Temperature
+  tft.setTextColor(ILI9341_YELLOW);
+  tft.setCursor(10, y);
+  tft.print("Temperature: ");
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print(currentData.temperature, 1);
+  tft.println(" C");
+  y += 20;
+  
+  // Humidity
+  tft.setTextColor(ILI9341_CYAN);
+  tft.setCursor(10, y);
+  tft.print("Humidity:    ");
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print(currentData.humidity, 1);
+  tft.println(" %");
+  y += 20;
+  
+  // Pressure
+  tft.setTextColor(ILI9341_GREEN);
+  tft.setCursor(10, y);
+  tft.print("Pressure:    ");
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print(currentData.pressure, 1);
+  tft.println(" hPa");
+  y += 20;
+  
+  // Light Level
+  tft.setTextColor(ILI9341_YELLOW);
+  tft.setCursor(10, y);
+  tft.print("Light Level: ");
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print(currentData.lightLevel, 1);
+  tft.println(" %");
+  y += 20;
+  
+  // Rain Level
+  tft.setTextColor(ILI9341_BLUE);
+  tft.setCursor(10, y);
+  tft.print("Rain Level:  ");
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print(currentData.rainLevel, 1);
+  tft.println(" %");
+  y += 20;
+  
+  // Wind Speed
+  tft.setTextColor(ILI9341_MAGENTA);
+  tft.setCursor(10, y);
+  tft.print("Wind Speed:  ");
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print(currentData.windSpeed, 1);
+  tft.println(" km/h");
+  
+  // Page indicator
+  tft.setTextColor(ILI9341_GRAY);
+  tft.setCursor(280, 220);
+  tft.println("1/3");
+}
+
+void displayWeatherConditions() {
+  tft.fillScreen(ILI9341_BLACK);
+  
+  // Header
+  tft.setTextColor(ILI9341_CYAN);
+  tft.setTextSize(2);
+  tft.setCursor(10, 10);
+  tft.println("Weather Conditions");
+  
+  // Draw line
+  tft.drawLine(0, 35, 320, 35, ILI9341_CYAN);
+  
+  if (!currentData.dataValid || (millis() - lastDataUpdate) > DATA_TIMEOUT) {
+    tft.setTextColor(ILI9341_RED);
+    tft.setTextSize(2);
+    tft.setCursor(50, 120);
+    tft.println("No Data Available");
+    return;
+  }
+  
+  // Determine weather condition
+  String condition = getWeatherCondition();
+  String description = getWeatherDescription();
+  uint16_t conditionColor = getConditionColor(condition);
+  
+  // Display condition
+  tft.setTextColor(conditionColor);
+  tft.setTextSize(3);
+  tft.setCursor(50, 70);
+  tft.println(condition);
+  
+  // Display description
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(10, 120);
+  tft.println(description);
+  
+  // Display key metrics
+  tft.setTextColor(ILI9341_YELLOW);
+  tft.setCursor(10, 160);
+  tft.print("Temp: ");
+  tft.print(currentData.temperature, 1);
+  tft.print("C  Humidity: ");
+  tft.print(currentData.humidity, 1);
+  tft.println("%");
+  
+  tft.setCursor(10, 180);
+  tft.print("Pressure: ");
+  tft.print(currentData.pressure, 1);
+  tft.print(" hPa  Wind: ");
+  tft.print(currentData.windSpeed, 1);
+  tft.println(" km/h");
+  
+  // Page indicator
+  tft.setTextColor(ILI9341_GRAY);
+  tft.setCursor(280, 220);
+  tft.println("2/3");
+}
+
+void displayHistoricalData() {
+  tft.fillScreen(ILI9341_BLACK);
+  
+  // Header
+  tft.setTextColor(ILI9341_CYAN);
+  tft.setTextSize(2);
+  tft.setCursor(10, 10);
+  tft.println("Historical Data");
+  
+  // Draw line
+  tft.drawLine(0, 35, 320, 35, ILI9341_CYAN);
+  
+  if (historyCount == 0) {
+    tft.setTextColor(ILI9341_RED);
+    tft.setTextSize(2);
+    tft.setCursor(50, 120);
+    tft.println("No History Available");
+    return;
+  }
+  
+  // Display temperature trend (simple graph)
+  drawTemperatureTrend();
+  
+  // Display recent readings
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(10, 150);
+  tft.println("Recent readings (last 6):");
+  
+  int startIdx = (historyIndex - 6 + historyCount) % historyCount;
+  int y = 170;
+  
+  for (int i = 0; i < min(6, historyCount); i++) {
+    int idx = (startIdx + i) % historyCount;
+    tft.setCursor(10, y);
+    tft.print(historicalData[idx].temperature, 1);
+    tft.print("C ");
+    tft.print(historicalData[idx].humidity, 1);
+    tft.print("% ");
+    tft.print(historicalData[idx].pressure, 0);
+    tft.println("hPa");
+    y += 12;
+  }
+  
+  // Page indicator
+  tft.setTextColor(ILI9341_GRAY);
+  tft.setCursor(280, 220);
+  tft.println("3/3");
+}
+
+void drawTemperatureTrend() {
+  if (historyCount < 2) return;
+  
+  // Find min/max temperature for scaling
+  float minTemp = historicalData[0].temperature;
+  float maxTemp = historicalData[0].temperature;
+  
+  for (int i = 0; i < historyCount; i++) {
+    if (historicalData[i].temperature < minTemp) minTemp = historicalData[i].temperature;
+    if (historicalData[i].temperature > maxTemp) maxTemp = historicalData[i].temperature;
+  }
+  
+  // Draw graph area
+  int graphX = 20;
+  int graphY = 50;
+  int graphW = 280;
+  int graphH = 80;
+  
+  tft.drawRect(graphX, graphY, graphW, graphH, ILI9341_GRAY);
+  
+  // Draw temperature line
+  float tempRange = maxTemp - minTemp;
+  if (tempRange < 1) tempRange = 1; // Avoid division by zero
+  
+  for (int i = 1; i < historyCount && i < 20; i++) {
+    int x1 = graphX + (i - 1) * graphW / min(historyCount - 1, 19);
+    int y1 = graphY + graphH - (historicalData[i - 1].temperature - minTemp) * graphH / tempRange;
+    int x2 = graphX + i * graphW / min(historyCount - 1, 19);
+    int y2 = graphY + graphH - (historicalData[i].temperature - minTemp) * graphH / tempRange;
+    
+    tft.drawLine(x1, y1, x2, y2, ILI9341_YELLOW);
+  }
+  
+  // Draw labels
+  tft.setTextColor(ILI9341_GRAY);
+  tft.setTextSize(1);
+  tft.setCursor(graphX, graphY + graphH + 5);
+  tft.print("Min: ");
+  tft.print(minTemp, 1);
+  tft.print("C  Max: ");
+  tft.print(maxTemp, 1);
+  tft.println("C");
+}
+
+String getWeatherCondition() {
+  if (currentData.rainLevel > 70) {
+    return "Rainy";
+  } else if (currentData.rainLevel > 30) {
+    return "Cloudy";
+  } else if (currentData.lightLevel > 80) {
+    return "Sunny";
+  } else if (currentData.lightLevel > 40) {
+    return "Partly Cloudy";
+  } else {
+    return "Overcast";
+  }
+}
+
+String getWeatherDescription() {
+  String desc = "Current conditions: ";
+  
+  if (currentData.temperature > 30) {
+    desc += "Hot, ";
+  } else if (currentData.temperature > 20) {
+    desc += "Warm, ";
+  } else if (currentData.temperature > 10) {
+    desc += "Cool, ";
+  } else {
+    desc += "Cold, ";
+  }
+  
+  if (currentData.humidity > 80) {
+    desc += "very humid";
+  } else if (currentData.humidity > 60) {
+    desc += "humid";
+  } else if (currentData.humidity > 40) {
+    desc += "moderate humidity";
+  } else {
+    desc += "dry";
+  }
+  
+  if (currentData.windSpeed > 20) {
+    desc += ", windy";
+  } else if (currentData.windSpeed > 10) {
+    desc += ", breezy";
+  } else {
+    desc += ", calm";
+  }
+  
+  return desc;
+}
+
+uint16_t getConditionColor(String condition) {
+  if (condition == "Sunny") return ILI9341_YELLOW;
+  else if (condition == "Rainy") return ILI9341_BLUE;
+  else if (condition == "Cloudy") return ILI9341_GRAY;
+  else if (condition == "Partly Cloudy") return ILI9341_CYAN;
+  else return ILI9341_WHITE;
+}
