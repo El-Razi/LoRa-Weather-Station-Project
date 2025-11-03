@@ -1,0 +1,193 @@
+/*
+ * Weather Station - Arduino Uno Sensor Unit
+ * Reads multiple sensor data and transmits via LoRa RYLR998
+ * 
+ * Hardware Connections:
+ * - DHT22: Pin 2
+ * - BMP280: I2C (SDA=A4, SCL=A5)
+ * - Rain Sensor: Analog Pin A0
+ * - LDR Light Sensor: Analog Pin A1
+ * - Wind Speed (Anemometer): Pin 3 (interrupt)
+ * - RYLR998 LoRa: Serial (Pins 4, 5 via SoftwareSerial)
+ */
+
+#include <SoftwareSerial.h>
+#include <DHT.h>
+#include <Wire.h>
+#include <Adafruit_BMP280.h>
+
+// Pin definitions
+#define DHT_PIN 2
+#define DHT_TYPE DHT22
+#define RAIN_PIN A0
+#define LIGHT_PIN A1
+#define WIND_PIN 3
+#define LORA_RX 4
+#define LORA_TX 5
+
+// Sensor objects
+DHT dht(DHT_PIN, DHT_TYPE);
+Adafruit_BMP280 bmp;
+SoftwareSerial loraSerial(LORA_RX, LORA_TX);
+
+// Wind measurement variables
+volatile unsigned int windPulseCount = 0;
+unsigned long lastWindTime = 0;
+float windSpeed = 0.0;
+
+// Data transmission variables
+unsigned long lastTransmission = 0;
+const unsigned long TRANSMISSION_INTERVAL = 60000; // 1 minute
+
+// Sensor data structure
+struct WeatherData {
+  float temperature;
+  float humidity;
+  float pressure;
+  float lightLevel;
+  float rainLevel;
+  float windSpeed;
+  unsigned long timestamp;
+};
+
+void setup() {
+  Serial.begin(9600);
+  loraSerial.begin(9600);
+  
+  // Initialize sensors
+  dht.begin();
+  
+  if (!bmp.begin(0x76)) {
+    Serial.println("BMP280 not found!");
+    while (1);
+  }
+  
+  // Configure BMP280
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
+                  Adafruit_BMP280::SAMPLING_X2,
+                  Adafruit_BMP280::SAMPLING_X16,
+                  Adafruit_BMP280::FILTER_X16,
+                  Adafruit_BMP280::STANDBY_MS_500);
+  
+  // Setup wind sensor interrupt
+  pinMode(WIND_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(WIND_PIN), windPulseCounter, FALLING);
+  
+  // Initialize LoRa module
+  initLoRa();
+  
+  Serial.println("Weather Station Sensor Unit Initialized");
+  delay(2000);
+}
+
+void loop() {
+  if (millis() - lastTransmission >= TRANSMISSION_INTERVAL) {
+    WeatherData data = readSensorData();
+    transmitData(data);
+    printDataToSerial(data);
+    lastTransmission = millis();
+  }
+  
+  delay(1000);
+}
+
+WeatherData readSensorData() {
+  WeatherData data;
+  
+  // Read DHT22 (Temperature & Humidity)
+  data.temperature = dht.readTemperature();
+  data.humidity = dht.readHumidity();
+  
+  // Check if DHT readings are valid
+  if (isnan(data.temperature) || isnan(data.humidity)) {
+    data.temperature = -999;
+    data.humidity = -999;
+  }
+  
+  // Read BMP280 (Pressure)
+  data.pressure = bmp.readPressure() / 100.0; // Convert to hPa
+  
+  // Read light sensor (LDR)
+  int lightReading = analogRead(LIGHT_PIN);
+  data.lightLevel = map(lightReading, 0, 1023, 0, 100); // Convert to percentage
+  
+  // Read rain sensor
+  int rainReading = analogRead(RAIN_PIN);
+  data.rainLevel = map(rainReading, 0, 1023, 0, 100); // Convert to percentage
+  
+  // Calculate wind speed
+  calculateWindSpeed();
+  data.windSpeed = windSpeed;
+  
+  // Add timestamp
+  data.timestamp = millis();
+  
+  return data;
+}
+
+void windPulseCounter() {
+  windPulseCount++;
+}
+
+void calculateWindSpeed() {
+  unsigned long currentTime = millis();
+  unsigned long timeDiff = currentTime - lastWindTime;
+  
+  if (timeDiff >= 5000) { // Calculate every 5 seconds
+    // Assuming each pulse = 2.4 km/h (typical anemometer)
+    windSpeed = (windPulseCount * 2.4 * 1000) / timeDiff; // km/h
+    windPulseCount = 0;
+    lastWindTime = currentTime;
+  }
+}
+
+void initLoRa() {
+  delay(1000);
+  
+  // Reset LoRa module
+  loraSerial.println("AT+RESET");
+  delay(2000);
+  
+  // Set network ID
+  loraSerial.println("AT+NETWORKID=5");
+  delay(500);
+  
+  // Set address for this unit (sensor unit)
+  loraSerial.println("AT+ADDRESS=1");
+  delay(500);
+  
+  // Set transmission parameters
+  loraSerial.println("AT+PARAMETER=12,4,1,7");
+  delay(500);
+  
+  Serial.println("LoRa initialized");
+}
+
+void transmitData(WeatherData data) {
+  // Format data as comma-separated string
+  String dataString = String(data.temperature, 1) + "," +
+                     String(data.humidity, 1) + "," +
+                     String(data.pressure, 1) + "," +
+                     String(data.lightLevel, 1) + "," +
+                     String(data.rainLevel, 1) + "," +
+                     String(data.windSpeed, 1) + "," +
+                     String(data.timestamp);
+  
+  // Send via LoRa to display unit (address 2)
+  String command = "AT+SEND=2," + String(dataString.length()) + "," + dataString;
+  loraSerial.println(command);
+  
+  Serial.println("Data transmitted: " + dataString);
+}
+
+void printDataToSerial(WeatherData data) {
+  Serial.println("=== Weather Data ===");
+  Serial.println("Temperature: " + String(data.temperature) + "°C");
+  Serial.println("Humidity: " + String(data.humidity) + "%");
+  Serial.println("Pressure: " + String(data.pressure) + " hPa");
+  Serial.println("Light Level: " + String(data.lightLevel) + "%");
+  Serial.println("Rain Level: " + String(data.rainLevel) + "%");
+  Serial.println("Wind Speed: " + String(data.windSpeed) + " km/h");
+  Serial.println("Timestamp: " + String(data.timestamp));
+  Serial.println("==================");
+}
